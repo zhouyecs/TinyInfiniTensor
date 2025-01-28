@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <numeric>
 #include <queue>
+#include "operators/transpose.h"
+#include "operators/matmul.h"
 
 namespace infini
 {
@@ -98,6 +100,18 @@ namespace infini
         return this->sorted = true;
     }
 
+    // 1. 判断两个 transpose 是否互逆
+    bool isInverse(const TransposeObj& a, const TransposeObj& b) {
+        auto permA = a.getPermute();
+        auto permB = b.getPermute();
+        for (int i = 0; i < (int)permA.size(); i++) {
+            if (permA[permB[i]] != i) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void GraphObj::optimize()
     {
         // =================================== 作业 ===================================
@@ -106,6 +120,86 @@ namespace infini
         // 1. 去除冗余的算子（例如，两个相邻的算子都是 transpose 算子，且做的是相反的操作，可以将其全部删除）
         // 2. 合并算子（例如，矩阵乘算子中含有属性transA、transB，如果其输入存在transpose，且对最后两个维度做交换，就可以将transpose融入到矩阵乘算子的属性中去）
         // =================================== 作业 ===================================
+
+        // 1：去除冗余的算子
+        std::vector<Operator> remove_vec= {};
+        for (auto op : ops)
+        {
+            if (op->getOpType() == OpType::Transpose)
+            {
+                auto input  = op->getInputs()[0];
+                auto output = op->getOutput();
+
+                auto next_op = output->getTargets()[0];
+                if (next_op->getOpType() == OpType::Transpose)
+                {
+                    auto next_output = next_op->getOutput();
+                    if (next_output->getDims() == input->getDims())
+                    {
+                        remove_vec.push_back(op);
+                        remove_vec.push_back(next_op);
+                        for (auto target : next_output->getTargets())
+                        {
+                            input->addTarget(target);
+                            target->replaceInput(next_output, input);
+                            target->removePredecessors(next_op);
+                        }
+                        input->removeTarget(op);
+                        removeTensor(output);
+                        removeTensor(next_output);
+                    }
+                }
+            }
+        }
+
+        // 2：合并算子
+        for (auto op : ops)
+        {
+            if (op->getOpType() == OpType::MatMul)
+            {
+                auto matlut_op = as<MatmulObj>(op);
+                auto input_a = op->getInputs()[0];
+                auto input_b = op->getInputs()[1];
+                auto output  = op->getOutput();
+                if (input_a->getSource() && input_a->getSource()->getOpType() == OpType::Transpose)
+                {
+                    auto transpose_op = input_a->getSource();
+                    auto permute = as<TransposeObj>(transpose_op)->getPermute();
+                    if (permute.size() >= 2 && permute[permute.size() - 2] == static_cast<int>(permute.size() - 1) && permute[permute.size() - 1] == static_cast<int>(permute.size() - 2))
+                    {
+                        matlut_op->setTransA(true);
+                        auto transpose_input = transpose_op->getInputs()[0];
+                        transpose_input->removeTarget(transpose_op);
+                        transpose_input->addTarget(matlut_op);
+                        matlut_op->replaceInput(input_a, transpose_input);
+                        matlut_op->removePredecessors(transpose_op);
+                        remove_vec.push_back(transpose_op);
+                        removeTensor(transpose_op->getOutput());
+                    }
+                }
+                if (input_b->getSource() && input_b->getSource()->getOpType() == OpType::Transpose)
+                {
+                    auto transpose_op = input_b->getSource();
+                    auto permute = as<TransposeObj>(transpose_op)->getPermute();
+                    if (permute.size() >= 2 && permute[permute.size() - 2] == static_cast<int>(permute.size() - 1) && permute[permute.size() - 1] == static_cast<int>(permute.size() - 2))
+                    {
+                        matlut_op->setTransB(true);
+                        auto transpose_input = transpose_op->getInputs()[0];
+                        transpose_input->removeTarget(transpose_op);
+                        transpose_input->addTarget(matlut_op);
+                        matlut_op->replaceInput(input_b, transpose_input);
+                        matlut_op->removePredecessors(transpose_op);
+                        remove_vec.push_back(transpose_op);
+                        removeTensor(transpose_op->getOutput());
+                    }
+                }
+            }
+        }
+
+        for (auto op : remove_vec)
+        {
+            removeOperator(op);
+        }
     }
 
     Tensor GraphObj::getTensor(int fuid) const
